@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use alloy_consensus::{proofs::calculate_receipt_root, BlockHeader, TxReceipt};
-use alloy_eips::{eip7685::Requests, Encodable2718};
-use alloy_primitives::{Bloom, Bytes, B256};
+use alloy_eips::eip7685::Requests;
+use alloy_primitives::{Bloom, B256};
 use reth_chainspec::EthereumHardforks;
 use reth_consensus::ConsensusError;
 use reth_primitives_traits::{
@@ -38,14 +38,25 @@ where
     // transaction This was replaced with is_success flag.
     // See more about EIP here: https://eips.ethereum.org/EIPS/eip-658
     if chain_spec.is_byzantium_active_at_block(block.header().number()) {
+        tracing::info!(
+            target: "consensus::validation",
+            block_number = block.header().number(),
+            receipts_count = receipts.len(),
+            header_receipts_root = ?block.header().receipts_root(),
+            header_logs_bloom = ?block.header().logs_bloom(),
+            "Verifying receipts for Byzantium+ block"
+        );
+        
         if let Err(error) =
             verify_receipts(block.header().receipts_root(), block.header().logs_bloom(), receipts)
         {
-            let receipts = receipts
-                .iter()
-                .map(|r| Bytes::from(r.with_bloom_ref().encoded_2718()))
-                .collect::<Vec<_>>();
-            tracing::debug!(%error, ?receipts, "receipts verification failed");
+            tracing::error!(
+                target: "consensus::validation",
+                block_number = block.header().number(),
+                receipts_count = receipts.len(),
+                %error,
+                "Receipts verification failed for block"
+            );
             return Err(error)
         }
     }
@@ -73,12 +84,91 @@ fn verify_receipts<R: Receipt>(
     expected_logs_bloom: Bloom,
     receipts: &[R],
 ) -> Result<(), ConsensusError> {
+    tracing::info!(
+        target: "consensus::validation",
+        receipts_count = receipts.len(),
+        expected_receipts_root = ?expected_receipts_root,
+        expected_logs_bloom = ?expected_logs_bloom,
+        "Starting receipts verification"
+    );
+
+    // Log each receipt for debugging
+    for (index, receipt) in receipts.iter().enumerate() {
+        tracing::debug!(
+            target: "consensus::validation",
+            receipt_index = index,
+            cumulative_gas_used = receipt.cumulative_gas_used(),
+            status = receipt.status(),
+            logs_count = receipt.logs().len(),
+            "Receipt details"
+        );
+        
+        // Log each log in the receipt
+        for (log_index, log) in receipt.logs().iter().enumerate() {
+            tracing::debug!(
+                target: "consensus::validation",
+                receipt_index = index,
+                log_index = log_index,
+                address = ?log.address,
+                topics_count = log.topics().len(),
+                data_length = log.data.data.len(),
+                "Log details"
+            );
+        }
+    }
+
     // Calculate receipts root.
     let receipts_with_bloom = receipts.iter().map(TxReceipt::with_bloom_ref).collect::<Vec<_>>();
     let receipts_root = calculate_receipt_root(&receipts_with_bloom);
 
+    tracing::info!(
+        target: "consensus::validation",
+        calculated_receipts_root = ?receipts_root,
+        "Calculated receipts root"
+    );
+
     // Calculate header logs bloom.
     let logs_bloom = receipts_with_bloom.iter().fold(Bloom::ZERO, |bloom, r| bloom | r.bloom_ref());
+
+    tracing::info!(
+        target: "consensus::validation",
+        calculated_logs_bloom = ?logs_bloom,
+        "Calculated logs bloom"
+    );
+
+    // Log detailed comparison
+    tracing::info!(
+        target: "consensus::validation",
+        receipts_root_match = (receipts_root == expected_receipts_root),
+        logs_bloom_match = (logs_bloom == expected_logs_bloom),
+        "Comparison results"
+    );
+
+    // If there's a mismatch, try to identify which receipt is causing the issue
+    if receipts_root != expected_receipts_root || logs_bloom != expected_logs_bloom {
+        tracing::warn!(
+            target: "consensus::validation",
+            "Mismatch detected, analyzing individual receipts..."
+        );
+        
+        // Analyze each receipt individually
+        for (index, receipt) in receipts.iter().enumerate() {
+            let single_receipt_with_bloom = vec![TxReceipt::with_bloom_ref(receipt)];
+            let single_receipt_root = calculate_receipt_root(&single_receipt_with_bloom);
+            let single_logs_bloom = single_receipt_with_bloom.iter().fold(Bloom::ZERO, |bloom, r| bloom | r.bloom_ref());
+            
+            tracing::warn!(
+                target: "consensus::validation",
+                receipt_index = index,
+                single_receipt_root = ?single_receipt_root,
+                single_logs_bloom = ?single_logs_bloom,
+                cumulative_gas_used = receipt.cumulative_gas_used(),
+                status = receipt.status(),
+                logs_count = receipt.logs().len(),
+                "Individual receipt analysis"
+            );
+        }
+    }
 
     compare_receipts_root_and_logs_bloom(
         receipts_root,
@@ -86,6 +176,11 @@ fn verify_receipts<R: Receipt>(
         expected_receipts_root,
         expected_logs_bloom,
     )?;
+
+    tracing::info!(
+        target: "consensus::validation",
+        "Receipts verification completed successfully"
+    );
 
     Ok(())
 }
@@ -99,12 +194,24 @@ fn compare_receipts_root_and_logs_bloom(
     expected_logs_bloom: Bloom,
 ) -> Result<(), ConsensusError> {
     if calculated_receipts_root != expected_receipts_root {
+        tracing::error!(
+            target: "consensus::validation",
+            calculated_receipts_root = ?calculated_receipts_root,
+            expected_receipts_root = ?expected_receipts_root,
+            "Receipts root mismatch detected"
+        );
         return Err(ConsensusError::BodyReceiptRootDiff(
             GotExpected { got: calculated_receipts_root, expected: expected_receipts_root }.into(),
         ))
     }
 
     if calculated_logs_bloom != expected_logs_bloom {
+        tracing::error!(
+            target: "consensus::validation",
+            calculated_logs_bloom = ?calculated_logs_bloom,
+            expected_logs_bloom = ?expected_logs_bloom,
+            "Logs bloom mismatch detected"
+        );
         return Err(ConsensusError::BodyBloomLogDiff(
             GotExpected { got: calculated_logs_bloom, expected: expected_logs_bloom }.into(),
         ))
