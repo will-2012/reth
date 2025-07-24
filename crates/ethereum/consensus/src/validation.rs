@@ -27,9 +27,65 @@ where
     // Check if gas used matches the value set in header.
     let cumulative_gas_used =
         receipts.last().map(|receipt| receipt.cumulative_gas_used()).unwrap_or(0);
-    if block.header().gas_used() != cumulative_gas_used {
+    
+    // Enhanced logging for gas used mismatch debugging
+    let header_gas_used = block.header().gas_used();
+    tracing::info!(
+        target: "consensus::validation",
+        block_number = block.header().number(),
+        header_gas_used = header_gas_used,
+        cumulative_gas_used = cumulative_gas_used,
+        gas_difference = header_gas_used as i64 - cumulative_gas_used as i64,
+        receipts_count = receipts.len(),
+        "Gas used validation check"
+    );
+    
+    if header_gas_used != cumulative_gas_used {
+        // Log detailed gas breakdown for debugging
+        tracing::error!(
+            target: "consensus::validation",
+            block_number = block.header().number(),
+            header_gas_used = header_gas_used,
+            cumulative_gas_used = cumulative_gas_used,
+            gas_difference = header_gas_used as i64 - cumulative_gas_used as i64,
+            "GAS USED MISMATCH DETECTED!"
+        );
+        
+        // Log each receipt's gas contribution
+        for (index, receipt) in receipts.iter().enumerate() {
+            let prev_cumulative = if index > 0 {
+                receipts[index - 1].cumulative_gas_used()
+            } else {
+                0
+            };
+            let receipt_gas_used = receipt.cumulative_gas_used() - prev_cumulative;
+            
+            tracing::error!(
+                target: "consensus::validation",
+                receipt_index = index,
+                receipt_gas_used = receipt_gas_used,
+                cumulative_gas_used = receipt.cumulative_gas_used(),
+                status = receipt.status(),
+                logs_count = receipt.logs().len(),
+                "Receipt gas breakdown"
+            );
+            
+            // Log each log in the receipt
+            for (log_index, log) in receipt.logs().iter().enumerate() {
+                tracing::error!(
+                    target: "consensus::validation",
+                    receipt_index = index,
+                    log_index = log_index,
+                    address = ?log.address,
+                    topics_count = log.topics().len(),
+                    data_length = log.data.data.len(),
+                    "Receipt log details"
+                );
+            }
+        }
+        
         return Err(ConsensusError::BlockGasUsed {
-            gas: GotExpected { got: cumulative_gas_used, expected: block.header().gas_used() },
+            gas: GotExpected { got: cumulative_gas_used, expected: header_gas_used },
             gas_spent_by_tx: gas_spent_by_transactions(receipts),
         })
     }
@@ -93,30 +149,40 @@ fn verify_receipts<R: Receipt>(
         "Starting receipts verification"
     );
 
-    // Log each receipt for debugging
+    // Enhanced logging: print all receipt details
+    tracing::info!("=== DETAILED RECEIPTS ANALYSIS ===");
     for (index, receipt) in receipts.iter().enumerate() {
-        tracing::debug!(
+        let prev_cumulative = if index > 0 {
+            receipts[index - 1].cumulative_gas_used()
+        } else {
+            0
+        };
+        let receipt_gas_used = receipt.cumulative_gas_used() - prev_cumulative;
+        
+        tracing::info!(
             target: "consensus::validation",
-            receipt_index = index,
-            cumulative_gas_used = receipt.cumulative_gas_used(),
-            status = receipt.status(),
-            logs_count = receipt.logs().len(),
-            "Receipt details"
+            "Receipt[{}] - gas_used: {}, cumulative_gas: {}, status: {:?}, logs_count: {}",
+            index,
+            receipt_gas_used,
+            receipt.cumulative_gas_used(),
+            receipt.status(),
+            receipt.logs().len()
         );
         
-        // Log each log in the receipt
+        // Log each log in the receipt with full details
         for (log_index, log) in receipt.logs().iter().enumerate() {
-            tracing::debug!(
+            tracing::info!(
                 target: "consensus::validation",
-                receipt_index = index,
-                log_index = log_index,
-                address = ?log.address,
-                topics_count = log.topics().len(),
-                data_length = log.data.data.len(),
-                "Log details"
+                "  Receipt[{}] Log[{}] - address: {:?}, topics: {:?}, data: {:?}",
+                index,
+                log_index,
+                log.address,
+                log.topics(),
+                log.data
             );
         }
     }
+    tracing::info!("=== END RECEIPTS ANALYSIS ===");
 
     // Calculate receipts root.
     let receipts_with_bloom = receipts.iter().map(TxReceipt::with_bloom_ref).collect::<Vec<_>>();
