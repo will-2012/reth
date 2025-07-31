@@ -26,7 +26,6 @@ use reth_eth_wire::{
     errors::{EthHandshakeError, EthStreamError},
     message::{EthBroadcastMessage, MessageError, RequestPair},
     Capabilities, DisconnectP2P, DisconnectReason, EthMessage, NetworkPrimitives, NewBlockPayload,
-    DedupPayload,
 };
 use reth_eth_wire_types::RawCapabilityMessage;
 use reth_metrics::common::mpsc::MeteredPollSender;
@@ -241,8 +240,6 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                         target: "net::session::bad_message_debug",
                         peer_id=?self.remote_peer_id,
                         request_id=?request_id,
-                        inflight_requests_count=?self.inflight_requests.len(),
-                        inflight_request_ids=?self.inflight_requests.keys().collect::<Vec<_>>(),
                         "Received response to unknown request - triggering BadMessage"
                     );
                     trace!(peer_id=?self.remote_peer_id, ?request_id, "received response to unknown request");
@@ -301,7 +298,7 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 debug!(
                     target: "net::session::bad_message_debug",
                     peer_id=?self.remote_peer_id,
-                    hashes_count=?msg.len(),
+                    hashes_count=?msg.0.len(),
                     "Processing NewPooledTransactionHashes66 message"
                 );
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
@@ -640,88 +637,14 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
     /// Report back that this session has been closed due to an error
     fn close_on_error(&mut self, error: EthStreamError, cx: &mut Context<'_>) -> Poll<()> {
-        // Enhanced error analysis with detailed session state
         debug!(
             target: "net::session::bad_message_debug",
             peer_id=?self.remote_peer_id,
             session_id=?self.session_id,
             remote_addr=?self.remote_addr,
             error=?error,
-            error_kind=?std::any::type_name::<EthStreamError>(),
-            inflight_requests_count=?self.inflight_requests.len(),
-            received_requests_count=?self.received_requests_from_remote.len(),
-            queued_outgoing_count=?self.queued_outgoing.messages.len(),
-            "Closing session due to error - detailed analysis"
+            "Closing session due to error"
         );
-        
-        // Log specific error details based on error type
-        match &error {
-            EthStreamError::P2PStreamError(p2p_err) => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    p2p_error=?p2p_err,
-                    "P2P stream error detected"
-                );
-            }
-            EthStreamError::ParseVersionError(parse_err) => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    parse_error=?parse_err,
-                    "Version parsing error detected"
-                );
-            }
-            EthStreamError::EthHandshakeError(handshake_err) => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    handshake_error=?handshake_err,
-                    "Ethereum handshake error detected"
-                );
-            }
-            EthStreamError::InvalidMessage(ref msg_err) => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    message_error=?msg_err,
-                    "Invalid message error detected"
-                );
-            }
-            EthStreamError::MessageTooBig(size) => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    message_size=?size,
-                    "Message too big error detected"
-                );
-            }
-            EthStreamError::TransactionHashesInvalidLenOfFields { hashes_len, types_len, sizes_len } => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    hashes_len=?hashes_len,
-                    types_len=?types_len,
-                    sizes_len=?sizes_len,
-                    "Transaction hashes invalid length of fields error detected"
-                );
-            }
-            EthStreamError::StreamTimeout => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    "Stream timeout error detected"
-                );
-            }
-            EthStreamError::UnsupportedMessage { message_id } => {
-                debug!(
-                    target: "net::session::bad_message_debug",
-                    peer_id=?self.remote_peer_id,
-                    message_id=?message_id,
-                    "Unsupported message error detected"
-                );
-            }
-        }
         
         let msg = ActiveSessionMessage::ClosedOnConnectionError {
             peer_id: self.remote_peer_id,
@@ -773,21 +696,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
         for (id, req) in &mut self.inflight_requests {
             if req.is_timed_out(now) {
                 if req.is_waiting() {
-                    debug!(
-                        target: "net::session::bad_message_debug",
-                        peer_id=?self.remote_peer_id,
-                        request_id=?id,
-                        "Timing out outgoing request"
-                    );
                     debug!(target: "net::session", ?id, remote_peer_id=?self.remote_peer_id, "timed out outgoing request");
                     req.timeout();
                 } else if now - req.timestamp > self.protocol_breach_request_timeout {
-                    debug!(
-                        target: "net::session::bad_message_debug",
-                        peer_id=?self.remote_peer_id,
-                        request_id=?id,
-                        "Request exceeded protocol breach timeout - will terminate session"
-                    );
                     return true
                 }
             }
@@ -995,99 +906,20 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                                         progress = true;
                                     }
                                     OnIncomingMessageOutcome::BadMessage { error, message } => {
-                                        // Enhanced BadMessage debugging with detailed error analysis
                                         debug!(
                                             target: "net::session::bad_message_debug",
                                             peer_id=?this.remote_peer_id,
                                             session_id=?this.session_id,
                                             remote_addr=?this.remote_addr,
                                             error=?error,
-                                            error_kind=?std::any::type_name::<EthStreamError>(),
                                             message_id=?message.message_id(),
-                                            "BadMessage detected - closing session due to protocol violation"
-                                        );
-                                        
-                                        // Log specific error details based on error type
-                                        match &error {
-                                            EthStreamError::P2PStreamError(p2p_err) => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    p2p_error=?p2p_err,
-                                                    "BadMessage: P2P stream error"
-                                                );
-                                            }
-                                            EthStreamError::ParseVersionError(parse_err) => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    parse_error=?parse_err,
-                                                    "BadMessage: Version parsing error"
-                                                );
-                                            }
-                                            EthStreamError::EthHandshakeError(handshake_err) => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    handshake_error=?handshake_err,
-                                                    "BadMessage: Ethereum handshake error"
-                                                );
-                                            }
-                                            EthStreamError::InvalidMessage(ref msg_err) => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    message_error=?msg_err,
-                                                    "BadMessage: Invalid message format"
-                                                );
-                                            }
-                                            EthStreamError::MessageTooBig(size) => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    message_size=?size,
-                                                    "BadMessage: Message too big"
-                                                );
-                                            }
-                                            EthStreamError::TransactionHashesInvalidLenOfFields { hashes_len, types_len, sizes_len } => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    hashes_len=?hashes_len,
-                                                    types_len=?types_len,
-                                                    sizes_len=?sizes_len,
-                                                    "BadMessage: Transaction hashes invalid length of fields"
-                                                );
-                                            }
-                                            EthStreamError::StreamTimeout => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    "BadMessage: Stream timeout"
-                                                );
-                                            }
-                                            EthStreamError::UnsupportedMessage { message_id } => {
-                                                debug!(
-                                                    target: "net::session::bad_message_debug",
-                                                    peer_id=?this.remote_peer_id,
-                                                    message_id=?message_id,
-                                                    "BadMessage: Unsupported message"
-                                                );
-                                            }
-                                        }
-                                        
-                                        // Log session state information
-                                        debug!(
-                                            target: "net::session::bad_message_debug",
-                                            peer_id=?this.remote_peer_id,
+                                            message_type=?std::any::type_name::<EthMessage<N>>(),
                                             inflight_requests_count=?this.inflight_requests.len(),
                                             received_requests_count=?this.received_requests_from_remote.len(),
-                                            queued_outgoing_count=?this.queued_outgoing.messages.len(),
-                                            "BadMessage: Session state at time of error"
+                                            "BadMessage detected - closing session due to protocol violation"
                                         );
-                                        
-                                        this.on_bad_message();
-                                        return this.close_on_error(error, cx);
+                                        debug!(target: "net::session", %error, msg=?message, remote_peer_id=?this.remote_peer_id, "received invalid protocol message");
+                                        return this.close_on_error(error, cx)
                                     }
                                     OnIncomingMessageOutcome::NoCapacity(msg) => {
                                         // failed to send due to lack of capacity
