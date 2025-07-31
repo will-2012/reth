@@ -76,7 +76,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, oneshot::error::RecvError};
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
-use tracing::{debug, trace};
+use tracing::{debug, trace, error};
 
 /// The future for importing transactions into the pool.
 ///
@@ -518,6 +518,12 @@ impl<Pool: TransactionPool, N: NetworkPrimitives, PBundle: TransactionPolicies>
     }
 
     fn on_request_error(&self, peer_id: PeerId, req_err: RequestError) {
+        error!(target: "net::transactions", 
+            peer_id = %peer_id, 
+            error = ?req_err,
+            "Transaction request error - this will trigger report_bad_message"
+        );
+        
         let kind = match req_err {
             RequestError::UnsupportedCapability => ReputationChangeKind::BadProtocol,
             RequestError::Timeout => ReputationChangeKind::Timeout,
@@ -1463,7 +1469,11 @@ where
                 }
             }
             FetchEvent::FetchError { peer_id, error } => {
-                trace!(target: "net::tx", ?peer_id, %error, "requesting transactions from peer failed");
+                error!(target: "net::transactions", 
+                    peer_id = %peer_id, 
+                    error = ?error,
+                    "Transaction fetch error - this will trigger report_bad_message"
+                );
                 self.on_request_error(peer_id, error);
             }
             FetchEvent::EmptyResponse { peer_id } => {

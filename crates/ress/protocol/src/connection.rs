@@ -211,6 +211,12 @@ where
                 {
                     let _ = tx.send(res.message);
                 } else {
+                    error!(target: "ress::net::connection", 
+                        peer_id = %self.peer_id, 
+                        request_id = res.request_id,
+                        message_type = "Headers",
+                        "Received unexpected response - this will trigger report_bad_message"
+                    );
                     self.report_bad_message();
                 }
             }
@@ -220,6 +226,12 @@ where
                 {
                     let _ = tx.send(res.message);
                 } else {
+                    error!(target: "ress::net::connection", 
+                        peer_id = %self.peer_id, 
+                        request_id = res.request_id,
+                        message_type = "BlockBodies",
+                        "Received unexpected response - this will trigger report_bad_message"
+                    );
                     self.report_bad_message();
                 }
             }
@@ -229,6 +241,12 @@ where
                 {
                     let _ = tx.send(res.message);
                 } else {
+                    error!(target: "ress::net::connection", 
+                        peer_id = %self.peer_id, 
+                        request_id = res.request_id,
+                        message_type = "Bytecode",
+                        "Received unexpected response - this will trigger report_bad_message"
+                    );
                     self.report_bad_message();
                 }
             }
@@ -238,6 +256,12 @@ where
                 {
                     let _ = tx.send(res.message);
                 } else {
+                    error!(target: "ress::net::connection", 
+                        peer_id = %self.peer_id, 
+                        request_id = res.request_id,
+                        message_type = "Witness",
+                        "Received unexpected response - this will trigger report_bad_message"
+                    );
                     self.report_bad_message();
                 }
             }
@@ -295,7 +319,14 @@ where
                         msg
                     }
                     Err(error) => {
-                        trace!(target: "ress::net::connection", peer_id = %this.peer_id, %error, "Error decoding peer message");
+                        // 添加详细错误日志
+                        error!(target: "ress::net::connection", 
+                            peer_id = %this.peer_id, 
+                            error = %error, 
+                            message_hex = %alloy_primitives::hex::encode(&next[..]),
+                            message_len = next.len(),
+                            "Failed to decode peer message - this will trigger report_bad_message"
+                        );
                         this.report_bad_message();
                         continue;
                     }

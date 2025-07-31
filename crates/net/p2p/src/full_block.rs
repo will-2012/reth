@@ -25,7 +25,7 @@ use std::{
     sync::Arc,
     task::{ready, Context, Poll},
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 /// A Client that can fetch full blocks from the network.
 #[derive(Debug, Clone)]
@@ -157,7 +157,12 @@ where
                 // ensure the block is valid, else retry
                 if let Err(err) = self.consensus.validate_body_against_header(resp.data(), &header)
                 {
-                    debug!(target: "downloaders", %err, hash=?header.hash(), "Received wrong body");
+                    error!(target: "downloaders", 
+                        peer_id = %resp.peer_id(),
+                        hash = ?header.hash(),
+                        error = %err,
+                        "Block body validation failed - this will trigger report_bad_message"
+                    );
                     self.client.report_bad_message(resp.peer_id());
                     self.header = Some(header);
                     self.request.body = Some(self.client.get_block_body(self.hash));
@@ -171,7 +176,12 @@ where
     fn on_block_response(&mut self, resp: WithPeerId<Client::Body>) {
         if let Some(ref header) = self.header {
             if let Err(err) = self.consensus.validate_body_against_header(resp.data(), header) {
-                debug!(target: "downloaders", %err, hash=?header.hash(), "Received wrong body");
+                error!(target: "downloaders", 
+                    peer_id = %resp.peer_id(),
+                    hash = ?header.hash(),
+                    error = %err,
+                    "Block body validation failed in on_block_response - this will trigger report_bad_message"
+                );
                 self.client.report_bad_message(resp.peer_id());
                 return
             }
@@ -205,7 +215,12 @@ where
                                 if header.hash() == this.hash {
                                     this.header = Some(header);
                                 } else {
-                                    debug!(target: "downloaders", expected=?this.hash, received=?header.hash(), "Received wrong header");
+                                    error!(target: "downloaders", 
+                                        peer_id = %peer,
+                                        expected_hash = ?this.hash, 
+                                        received_hash = ?header.hash(),
+                                        "Received wrong header hash - this will trigger report_bad_message"
+                                    );
                                     // received a different header than requested
                                     this.client.report_bad_message(peer)
                                 }
@@ -412,7 +427,12 @@ where
                         if let Err(err) =
                             self.consensus.validate_body_against_header(resp.data(), header)
                         {
-                            debug!(target: "downloaders", %err, hash=?header.hash(), "Received wrong body in range response");
+                            error!(target: "downloaders", 
+                                peer_id = %resp.peer_id(),
+                                hash = ?header.hash(),
+                                error = %err,
+                                "Block body validation failed in range response - this will trigger report_bad_message"
+                            );
                             self.client.report_bad_message(resp.peer_id());
 
                             // get body that doesn't match, put back into vecdeque, and retry it
@@ -464,7 +484,12 @@ where
                 let headers_rising = headers_falling.iter().rev().cloned().collect::<Vec<_>>();
                 // check if the downloaded headers are valid
                 if let Err(err) = self.consensus.validate_header_range(&headers_rising) {
-                    debug!(target: "downloaders", %err, ?self.start_hash, "Received bad header response");
+                    error!(target: "downloaders", 
+                        peer_id = %peer,
+                        start_hash = ?self.start_hash,
+                        error = %err,
+                        "Header range validation failed - this will trigger report_bad_message"
+                    );
                     self.client.report_bad_message(peer);
                 }
 
@@ -484,6 +509,12 @@ where
                 self.headers = Some(headers_falling);
             } else {
                 // received a different header than requested
+                error!(target: "downloaders", 
+                    peer_id = %peer,
+                    expected_start_hash = ?self.start_hash,
+                    received_start_hash = ?headers_falling[0].hash(),
+                    "Received wrong start header hash in range response - this will trigger report_bad_message"
+                );
                 self.client.report_bad_message(peer);
             }
         }
