@@ -241,6 +241,8 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                         target: "net::session::bad_message_debug",
                         peer_id=?self.remote_peer_id,
                         request_id=?request_id,
+                        inflight_requests_count=?self.inflight_requests.len(),
+                        inflight_request_ids=?self.inflight_requests.keys().collect::<Vec<_>>(),
                         "Received response to unknown request - triggering BadMessage"
                     );
                     trace!(peer_id=?self.remote_peer_id, ?request_id, "received response to unknown request");
@@ -771,9 +773,21 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
         for (id, req) in &mut self.inflight_requests {
             if req.is_timed_out(now) {
                 if req.is_waiting() {
+                    debug!(
+                        target: "net::session::bad_message_debug",
+                        peer_id=?self.remote_peer_id,
+                        request_id=?id,
+                        "Timing out outgoing request"
+                    );
                     debug!(target: "net::session", ?id, remote_peer_id=?self.remote_peer_id, "timed out outgoing request");
                     req.timeout();
                 } else if now - req.timestamp > self.protocol_breach_request_timeout {
+                    debug!(
+                        target: "net::session::bad_message_debug",
+                        peer_id=?self.remote_peer_id,
+                        request_id=?id,
+                        "Request exceeded protocol breach timeout - will terminate session"
+                    );
                     return true
                 }
             }
