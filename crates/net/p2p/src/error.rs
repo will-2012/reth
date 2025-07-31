@@ -11,6 +11,7 @@ use reth_network_types::ReputationChangeKind;
 use reth_primitives_traits::{GotExpected, GotExpectedBoxed};
 use reth_storage_errors::{db::DatabaseError, provider::ProviderError};
 use tokio::sync::{mpsc, oneshot};
+use tracing::debug;
 
 /// Result alias for result of a request.
 pub type RequestResult<T> = Result<T, RequestError>;
@@ -32,22 +33,59 @@ impl<H: BlockHeader> EthResponseValidator for RequestResult<Vec<H>> {
         match self {
             Ok(headers) => {
                 let request_length = headers.len() as u64;
+                
+                debug!(
+                    target: "net::p2p::headers_validation",
+                    request_limit=?request.limit,
+                    response_length=?request_length,
+                    request_start=?request.start,
+                    first_header_number=?headers.first().map(|h| h.number()),
+                    "Validating headers response"
+                );
 
                 if request_length <= 1 && request.limit != request_length {
+                    debug!(
+                        target: "net::p2p::headers_validation",
+                        request_limit=?request.limit,
+                        response_length=?request_length,
+                        "BAD RESPONSE: Response length mismatch - expected {}, got {}",
+                        request.limit, request_length
+                    );
                     return true
                 }
 
                 match request.start {
                     BlockHashOrNumber::Number(block_number) => {
-                        headers.first().is_some_and(|header| block_number != header.number())
+                        let is_bad = headers.first().is_some_and(|header| block_number != header.number());
+                        if is_bad {
+                            debug!(
+                                target: "net::p2p::headers_validation",
+                                expected_block_number=?block_number,
+                                actual_block_number=?headers.first().map(|h| h.number()),
+                                "BAD RESPONSE: Block number mismatch - expected {}, got {}",
+                                block_number, headers.first().map(|h| h.number()).unwrap_or_default()
+                            );
+                        }
+                        is_bad
                     }
                     BlockHashOrNumber::Hash(_) => {
                         // we don't want to hash the header
+                        debug!(
+                            target: "net::p2p::headers_validation",
+                            "Skipping hash-based validation"
+                        );
                         false
                     }
                 }
             }
-            Err(_) => true,
+            Err(err) => {
+                debug!(
+                    target: "net::p2p::headers_validation",
+                    error=?err,
+                    "BAD RESPONSE: Response is an error"
+                );
+                true
+            }
         }
     }
 

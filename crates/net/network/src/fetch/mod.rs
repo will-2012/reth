@@ -27,6 +27,7 @@ use std::{
 };
 use tokio::sync::{mpsc, mpsc::UnboundedSender, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::debug;
 
 type InflightHeadersRequest<H> = Request<HeadersRequest, PeerRequestResult<Vec<H>>>;
 type InflightBodiesRequest<B> = Request<Vec<B256>, PeerRequestResult<Vec<B>>>;
@@ -271,6 +272,16 @@ impl<N: NetworkPrimitives> StateFetcher<N> {
         let is_likely_bad_response =
             resp.as_ref().is_some_and(|r| res.is_likely_bad_headers_response(&r.request));
 
+        debug!(
+            target: "net::fetch::headers_response",
+            peer_id=?peer_id,
+            is_error=?is_error,
+            is_likely_bad_response=?is_likely_bad_response,
+            maybe_reputation_change=?maybe_reputation_change,
+            response_headers_count=?res.as_ref().map(|h| h.len()),
+            "Processing block headers response"
+        );
+
         if let Some(resp) = resp {
             // delegate the response
             let _ = resp.response.send(res.map(|h| (peer_id, h).into()));
@@ -279,6 +290,13 @@ impl<N: NetworkPrimitives> StateFetcher<N> {
         if let Some(peer) = self.peers.get_mut(&peer_id) {
             // update the peer's response state
             peer.last_response_likely_bad = is_likely_bad_response;
+
+            debug!(
+                target: "net::fetch::headers_response",
+                peer_id=?peer_id,
+                last_response_likely_bad=?peer.last_response_likely_bad,
+                "Updated peer response state"
+            );
 
             // If the peer is still ready to accept new requests, we try to send a followup
             // request immediately.
@@ -290,7 +308,15 @@ impl<N: NetworkPrimitives> StateFetcher<N> {
         // if the response was an `Err` worth reporting the peer for then we return a `BadResponse`
         // outcome
         maybe_reputation_change
-            .map(|reputation_change| BlockResponseOutcome::BadResponse(peer_id, reputation_change))
+            .map(|reputation_change| {
+                debug!(
+                    target: "net::fetch::headers_response",
+                    peer_id=?peer_id,
+                    reputation_change=?reputation_change,
+                    "Returning BadResponse outcome due to reputation change"
+                );
+                BlockResponseOutcome::BadResponse(peer_id, reputation_change)
+            })
     }
 
     /// Called on a `GetBlockBodies` response from a peer
