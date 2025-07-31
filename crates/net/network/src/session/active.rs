@@ -158,12 +158,30 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
     ///
     /// Returns an error if the message is considered to be in violation of the protocol.
     fn on_incoming_message(&mut self, msg: EthMessage<N>) -> OnIncomingMessageOutcome<N> {
+        // 添加详细的日志来帮助定位 BadMessage 错误
+        debug!(
+            target: "net::session::bad_message_debug",
+            peer_id=?self.remote_peer_id,
+            session_id=?self.session_id,
+            remote_addr=?self.remote_addr,
+            message_type=?std::any::type_name::<EthMessage<N>>(),
+            message_id=?msg.message_id(),
+            "Processing incoming message"
+        );
+
         /// A macro that handles an incoming request
         /// This creates a new channel and tries to send the sender half to the session while
         /// storing the receiver half internally so the pending response can be polled.
         macro_rules! on_request {
             ($req:ident, $resp_item:ident, $req_item:ident) => {{
                 let RequestPair { request_id, message: request } = $req;
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    request_id=?request_id,
+                    request_type=stringify!($req_item),
+                    "Processing request from peer"
+                );
                 let (tx, response) = oneshot::channel();
                 let received = ReceivedRequest {
                     request_id,
@@ -171,10 +189,10 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                     received: Instant::now(),
                 };
                 self.received_requests_from_remote.push(received);
-                self.try_emit_request(PeerMessage::EthRequest(PeerRequest::$req_item {
+                self.try_emit_request(PeerRequest::$req_item {
                     request,
                     response: tx,
-                }))
+                })
                 .into()
             }};
         }
@@ -183,6 +201,13 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
         macro_rules! on_response {
             ($resp:ident, $item:ident) => {{
                 let RequestPair { request_id, message } = $resp;
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    request_id=?request_id,
+                    response_type=stringify!($item),
+                    "Processing response from peer"
+                );
                 if let Some(req) = self.inflight_requests.remove(&request_id) {
                     match req.request {
                         RequestState::Waiting(PeerRequest::$item { response, .. }) => {
@@ -191,14 +216,32 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                             self.update_request_timeout(req.timestamp, Instant::now());
                         }
                         RequestState::Waiting(request) => {
+                            debug!(
+                                target: "net::session::bad_message_debug",
+                                peer_id=?self.remote_peer_id,
+                                request_id=?request_id,
+                                "Sending bad response due to request state mismatch"
+                            );
                             request.send_bad_response();
                         }
                         RequestState::TimedOut => {
+                            debug!(
+                                target: "net::session::bad_message_debug",
+                                peer_id=?self.remote_peer_id,
+                                request_id=?request_id,
+                                "Request was already timed out internally"
+                            );
                             // request was already timed out internally
                             self.update_request_timeout(req.timestamp, Instant::now());
                         }
                     }
                 } else {
+                    debug!(
+                        target: "net::session::bad_message_debug",
+                        peer_id=?self.remote_peer_id,
+                        request_id=?request_id,
+                        "Received response to unknown request - triggering BadMessage"
+                    );
                     trace!(peer_id=?self.remote_peer_id, ?request_id, "received response to unknown request");
                     // we received a response to a request we never sent
                     self.on_bad_message();
@@ -209,11 +252,24 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
         }
 
         match msg {
-            message @ EthMessage::Status(_) => OnIncomingMessageOutcome::BadMessage {
-                error: EthStreamError::EthHandshakeError(EthHandshakeError::StatusNotInHandshake),
-                message,
-            },
+            message @ EthMessage::Status(_) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Status message received outside handshake - BadMessage"
+                );
+                OnIncomingMessageOutcome::BadMessage {
+                    error: EthStreamError::EthHandshakeError(EthHandshakeError::StatusNotInHandshake),
+                    message,
+                }
+            }
             EthMessage::NewBlockHashes(msg) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    hashes_count=?msg.len(),
+                    "Processing NewBlockHashes message"
+                );
                 self.try_emit_broadcast(PeerMessage::NewBlockHashes(msg)).into()
             }
             EthMessage::NewBlock(msg) => {
@@ -221,16 +277,50 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                     hash: msg.block().header().hash_slow(),
                     block: Arc::new(*msg),
                 };
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    block_hash=?block.hash,
+                    "Processing NewBlock message"
+                );
                 self.try_emit_broadcast(PeerMessage::NewBlock(block)).into()
             }
             EthMessage::Transactions(msg) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    transactions_count=?msg.len(),
+                    "Processing Transactions message"
+                );
                 self.try_emit_broadcast(PeerMessage::ReceivedTransaction(msg)).into()
             }
             EthMessage::NewPooledTransactionHashes66(msg) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    hashes_count=?msg.len(),
+                    "Processing NewPooledTransactionHashes66 message"
+                );
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
             }
             EthMessage::NewPooledTransactionHashes68(msg) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    hashes_len=?msg.hashes.len(),
+                    types_len=?msg.types.len(),
+                    sizes_len=?msg.sizes.len(),
+                    "Processing NewPooledTransactionHashes68 message"
+                );
                 if msg.hashes.len() != msg.types.len() || msg.hashes.len() != msg.sizes.len() {
+                    debug!(
+                        target: "net::session::bad_message_debug",
+                        peer_id=?self.remote_peer_id,
+                        hashes_len=?msg.hashes.len(),
+                        types_len=?msg.types.len(),
+                        sizes_len=?msg.sizes.len(),
+                        "NewPooledTransactionHashes68 field length mismatch - BadMessage"
+                    );
                     return OnIncomingMessageOutcome::BadMessage {
                         error: EthStreamError::TransactionHashesInvalidLenOfFields {
                             hashes_len: msg.hashes.len(),
@@ -243,30 +333,76 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
             }
             EthMessage::GetBlockHeaders(req) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing GetBlockHeaders request"
+                );
                 on_request!(req, BlockHeaders, GetBlockHeaders)
             }
             EthMessage::BlockHeaders(resp) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing BlockHeaders response"
+                );
                 on_response!(resp, GetBlockHeaders)
             }
             EthMessage::GetBlockBodies(req) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing GetBlockBodies request"
+                );
                 on_request!(req, BlockBodies, GetBlockBodies)
             }
             EthMessage::BlockBodies(resp) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing BlockBodies response"
+                );
                 on_response!(resp, GetBlockBodies)
             }
             EthMessage::GetPooledTransactions(req) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing GetPooledTransactions request"
+                );
                 on_request!(req, PooledTransactions, GetPooledTransactions)
             }
             EthMessage::PooledTransactions(resp) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing PooledTransactions response"
+                );
                 on_response!(resp, GetPooledTransactions)
             }
             EthMessage::GetNodeData(req) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing GetNodeData request"
+                );
                 on_request!(req, NodeData, GetNodeData)
             }
             EthMessage::NodeData(resp) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing NodeData response"
+                );
                 on_response!(resp, GetNodeData)
             }
             EthMessage::GetReceipts(req) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    eth_version=?self.conn.version(),
+                    "Processing GetReceipts request"
+                );
                 if self.conn.version() >= EthVersion::Eth69 {
                     on_request!(req, Receipts69, GetReceipts69)
                 } else {
@@ -274,16 +410,40 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 }
             }
             EthMessage::Receipts(resp) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing Receipts response"
+                );
                 on_response!(resp, GetReceipts)
             }
             EthMessage::Receipts69(resp) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Processing Receipts69 response"
+                );
                 // TODO: remove mandatory blooms
                 let resp = resp.map(|receipts| receipts.into_with_bloom());
                 on_response!(resp, GetReceipts)
             }
             EthMessage::BlockRangeUpdate(msg) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    earliest=?msg.earliest,
+                    latest=?msg.latest,
+                    "Processing BlockRangeUpdate message"
+                );
                 // Validate that earliest <= latest according to the spec
                 if msg.earliest > msg.latest {
+                    debug!(
+                        target: "net::session::bad_message_debug",
+                        peer_id=?self.remote_peer_id,
+                        earliest=?msg.earliest,
+                        latest=?msg.latest,
+                        "Invalid block range: earliest > latest - BadMessage"
+                    );
                     return OnIncomingMessageOutcome::BadMessage {
                         error: EthStreamError::InvalidMessage(MessageError::Other(format!(
                             "invalid block range: earliest ({}) > latest ({})",
@@ -299,7 +459,15 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
                 OnIncomingMessageOutcome::Ok
             }
-            EthMessage::Other(bytes) => self.try_emit_broadcast(PeerMessage::Other(bytes)).into(),
+            EthMessage::Other(bytes) => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    bytes_len=?bytes.len(),
+                    "Processing Other message"
+                );
+                self.try_emit_broadcast(PeerMessage::Other(bytes)).into()
+            }
         }
     }
 
@@ -428,8 +596,31 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
     /// Notify the manager that the peer sent a bad message
     fn on_bad_message(&self) {
-        let Some(sender) = self.to_session_manager.inner().get_ref() else { return };
+        debug!(
+            target: "net::session::bad_message_debug",
+            peer_id=?self.remote_peer_id,
+            session_id=?self.session_id,
+            remote_addr=?self.remote_addr,
+            inflight_requests_count=?self.inflight_requests.len(),
+            received_requests_count=?self.received_requests_from_remote.len(),
+            "BadMessage triggered - sending BadMessage event to session manager"
+        );
+        
+        let Some(sender) = self.to_session_manager.inner().get_ref() else { 
+            debug!(
+                target: "net::session::bad_message_debug",
+                peer_id=?self.remote_peer_id,
+                "Failed to get session manager sender - cannot send BadMessage event"
+            );
+            return 
+        };
+        
         let _ = sender.try_send(ActiveSessionMessage::BadMessage { peer_id: self.remote_peer_id });
+        debug!(
+            target: "net::session::bad_message_debug",
+            peer_id=?self.remote_peer_id,
+            "BadMessage event sent to session manager"
+        );
     }
 
     /// Report back that this session has been closed.
@@ -446,6 +637,165 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
     /// Report back that this session has been closed due to an error
     fn close_on_error(&mut self, error: EthStreamError, cx: &mut Context<'_>) -> Poll<()> {
+        // Enhanced error analysis with detailed session state
+        debug!(
+            target: "net::session::bad_message_debug",
+            peer_id=?self.remote_peer_id,
+            session_id=?self.session_id,
+            remote_addr=?self.remote_addr,
+            error=?error,
+            error_kind=?std::any::type_name::<EthStreamError>(),
+            inflight_requests_count=?self.inflight_requests.len(),
+            received_requests_count=?self.received_requests_from_remote.len(),
+            queued_outgoing_count=?self.queued_outgoing.messages.len(),
+            "Closing session due to error - detailed analysis"
+        );
+        
+        // Log specific error details
+        match &error {
+            EthStreamError::InvalidMessage { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidMessage - message format violation"
+                );
+            }
+            EthStreamError::InvalidForkId { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidForkId - fork compatibility issue"
+                );
+            }
+            EthStreamError::InvalidStatus { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidStatus - status validation failed"
+                );
+            }
+            EthStreamError::InvalidBlock { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidBlock - block validation failed"
+                );
+            }
+            EthStreamError::InvalidTransaction { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidTransaction - transaction validation failed"
+                );
+            }
+            EthStreamError::InvalidHeader { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidHeader - header validation failed"
+                );
+            }
+            EthStreamError::InvalidBody { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidBody - body validation failed"
+                );
+            }
+            EthStreamError::InvalidReceipts { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidReceipts - receipts validation failed"
+                );
+            }
+            EthStreamError::InvalidPooledTransactions { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidPooledTransactions - pooled transactions validation failed"
+                );
+            }
+            EthStreamError::InvalidNewBlock { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidNewBlock - new block validation failed"
+                );
+            }
+            EthStreamError::InvalidNewBlockHashes { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidNewBlockHashes - new block hashes validation failed"
+                );
+            }
+            EthStreamError::InvalidGetBlockHeaders { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidGetBlockHeaders - get block headers request validation failed"
+                );
+            }
+            EthStreamError::InvalidGetBlockBodies { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidGetBlockBodies - get block bodies request validation failed"
+                );
+            }
+            EthStreamError::InvalidGetReceipts { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidGetReceipts - get receipts request validation failed"
+                );
+            }
+            EthStreamError::InvalidGetPooledTransactions { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidGetPooledTransactions - get pooled transactions request validation failed"
+                );
+            }
+            EthStreamError::InvalidBlockHeaders { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidBlockHeaders - block headers response validation failed"
+                );
+            }
+            EthStreamError::InvalidBlockBodies { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidBlockBodies - block bodies response validation failed"
+                );
+            }
+            EthStreamError::InvalidReceipts { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidReceipts - receipts response validation failed"
+                );
+            }
+            EthStreamError::InvalidPooledTransactions { .. } => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    "Session closing due to InvalidPooledTransactions - pooled transactions response validation failed"
+                );
+            }
+            _ => {
+                debug!(
+                    target: "net::session::bad_message_debug",
+                    peer_id=?self.remote_peer_id,
+                    error=?error,
+                    "Session closing due to other error type"
+                );
+            }
+        }
+        
         let msg = ActiveSessionMessage::ClosedOnConnectionError {
             peer_id: self.remote_peer_id,
             remote_addr: self.remote_addr,
@@ -706,6 +1056,176 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                                         progress = true;
                                     }
                                     OnIncomingMessageOutcome::BadMessage { error, message } => {
+                                        // Enhanced BadMessage debugging with detailed error analysis
+                                        debug!(
+                                            target: "net::session::bad_message_debug",
+                                            peer_id=?this.remote_peer_id,
+                                            session_id=?this.session_id,
+                                            remote_addr=?this.remote_addr,
+                                            error=?error,
+                                            error_kind=?std::any::type_name::<EthStreamError>(),
+                                            message_id=?message.message_id(),
+                                            message_type=?std::any::type_name::<EthMessage<N>>(),
+                                            inflight_requests_count=?this.inflight_requests.len(),
+                                            received_requests_count=?this.received_requests_from_remote.len(),
+                                            queued_outgoing_count=?this.queued_outgoing.messages.len(),
+                                            "BadMessage detected - closing session due to protocol violation"
+                                        );
+                                        
+                                        // Log detailed error information
+                                        match &error {
+                                            EthStreamError::InvalidMessage { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidMessage error - message format or content violation"
+                                                );
+                                            }
+                                            EthStreamError::InvalidForkId { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidForkId error - fork compatibility issue"
+                                                );
+                                            }
+                                            EthStreamError::InvalidStatus { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidStatus error - status message validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidBlock { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidBlock error - block data validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidTransaction { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidTransaction error - transaction data validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidHeader { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidHeader error - header data validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidBody { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidBody error - body data validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidReceipts { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidReceipts error - receipts data validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidPooledTransactions { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidPooledTransactions error - pooled transactions validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidNewBlock { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidNewBlock error - new block validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidNewBlockHashes { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidNewBlockHashes error - new block hashes validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidGetBlockHeaders { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidGetBlockHeaders error - get block headers request validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidGetBlockBodies { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidGetBlockBodies error - get block bodies request validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidGetReceipts { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidGetReceipts error - get receipts request validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidGetPooledTransactions { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidGetPooledTransactions error - get pooled transactions request validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidBlockHeaders { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidBlockHeaders error - block headers response validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidBlockBodies { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidBlockBodies error - block bodies response validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidReceipts { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidReceipts error - receipts response validation failed"
+                                                );
+                                            }
+                                            EthStreamError::InvalidPooledTransactions { .. } => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    "InvalidPooledTransactions error - pooled transactions response validation failed"
+                                                );
+                                            }
+                                            _ => {
+                                                debug!(
+                                                    target: "net::session::bad_message_debug",
+                                                    peer_id=?this.remote_peer_id,
+                                                    error=?error,
+                                                    "Other BadMessage error type"
+                                                );
+                                            }
+                                        }
+                                        
+                                        // Log message content analysis
+                                        debug!(
+                                            target: "net::session::bad_message_debug",
+                                            peer_id=?this.remote_peer_id,
+                                            message=?message,
+                                            message_size=?std::mem::size_of_val(&message),
+                                            "BadMessage content analysis"
+                                        );
+                                        
                                         debug!(target: "net::session", %error, msg=?message, remote_peer_id=?this.remote_peer_id, "received invalid protocol message");
                                         return this.close_on_error(error, cx)
                                     }
