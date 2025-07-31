@@ -14,7 +14,7 @@ use std::{
     env::VarError,
     path::{Path, PathBuf},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, error};
 
 /// Parses a user-specified path with support for environment variables and common shorthands (e.g.
 /// ~ for the user's home directory).
@@ -44,6 +44,12 @@ where
     let (peer_id, response) = client.get_header_with_priority(id, Priority::High).await?.split();
 
     let Some(header) = response else {
+        error!(target: "reth::utils", 
+            peer_id = %peer_id,
+            expected_count = 1,
+            received_count = 0,
+            "Received empty response for header request - this will trigger report_bad_message"
+        );
         client.report_bad_message(peer_id);
         eyre::bail!("Invalid number of headers received. Expected: 1. Received: 0")
     };
@@ -56,7 +62,12 @@ where
     };
 
     if !valid {
-        println!("INVALID");
+        error!(target: "reth::utils", 
+            peer_id = %peer_id,
+            received_header = ?header.num_hash(),
+            expected_id = ?id,
+            "Received invalid header - this will trigger report_bad_message"
+        );
         client.report_bad_message(peer_id);
         eyre::bail!(
             "Received invalid header. Received: {:?}. Expected: {:?}",
@@ -81,6 +92,12 @@ where
     let (peer_id, response) = client.get_block_body(header.hash()).await?.split();
 
     let Some(body) = response else {
+        error!(target: "reth::utils", 
+            peer_id = %peer_id,
+            expected_count = 1,
+            received_count = 0,
+            "Received empty response for body request - this will trigger report_bad_message"
+        );
         client.report_bad_message(peer_id);
         eyre::bail!("Invalid number of bodies received. Expected: 1. Received: 0")
     };
