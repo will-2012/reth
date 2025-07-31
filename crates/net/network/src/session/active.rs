@@ -206,11 +206,25 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                     peer_id=?self.remote_peer_id,
                     request_id=?request_id,
                     response_type=stringify!($item),
+                    inflight_requests_count=?self.inflight_requests.len(),
+                    inflight_request_ids=?self.inflight_requests.keys().collect::<Vec<_>>(),
                     "Processing response from peer"
                 );
                 if let Some(req) = self.inflight_requests.remove(&request_id) {
+                    debug!(
+                        target: "net::session::bad_message_debug",
+                        peer_id=?self.remote_peer_id,
+                        request_id=?request_id,
+                        "Found request in inflight_requests, checking request state"
+                    );
                     match req.request {
                         RequestState::Waiting(PeerRequest::$item { response, .. }) => {
+                            debug!(
+                                target: "net::session::bad_message_debug",
+                                peer_id=?self.remote_peer_id,
+                                request_id=?request_id,
+                                "Request state matches expected type - normal processing"
+                            );
                             trace!(peer_id=?self.remote_peer_id, ?request_id, "received response from peer");
                             let _ = response.send(Ok(message));
                             self.update_request_timeout(req.timestamp, Instant::now());
@@ -220,7 +234,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                                 target: "net::session::bad_message_debug",
                                 peer_id=?self.remote_peer_id,
                                 request_id=?request_id,
-                                "Sending bad response due to request state mismatch"
+                                expected_type=stringify!($item),
+                                actual_type=?std::any::type_name::<PeerRequest<N>>(),
+                                "BAD MESSAGE: Request state type mismatch - calling send_bad_response"
                             );
                             request.send_bad_response();
                         }
@@ -229,7 +245,7 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                                 target: "net::session::bad_message_debug",
                                 peer_id=?self.remote_peer_id,
                                 request_id=?request_id,
-                                "Request was already timed out internally"
+                                "Request was already timed out - updating timeout"
                             );
                             // request was already timed out internally
                             self.update_request_timeout(req.timestamp, Instant::now());
@@ -240,7 +256,10 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                         target: "net::session::bad_message_debug",
                         peer_id=?self.remote_peer_id,
                         request_id=?request_id,
-                        "Received response to unknown request - triggering BadMessage"
+                        response_type=stringify!($item),
+                        inflight_requests_count=?self.inflight_requests.len(),
+                        inflight_request_ids=?self.inflight_requests.keys().collect::<Vec<_>>(),
+                        "BAD MESSAGE: Received response to unknown request - request_id not found in inflight_requests"
                     );
                     trace!(peer_id=?self.remote_peer_id, ?request_id, "received response to unknown request");
                     // we received a response to a request we never sent
@@ -643,7 +662,8 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             session_id=?self.session_id,
             remote_addr=?self.remote_addr,
             error=?error,
-            "Closing session due to error"
+            error_type=?std::any::type_name::<EthStreamError>(),
+            "Closing session due to error - sending ClosedOnConnectionError"
         );
         
         let msg = ActiveSessionMessage::ClosedOnConnectionError {
@@ -652,6 +672,11 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             error,
         };
         self.terminate_message = Some((self.to_session_manager.inner().clone(), msg));
+        debug!(
+            target: "net::session::bad_message_debug",
+            peer_id=?self.remote_peer_id,
+            "ClosedOnConnectionError message queued for session manager"
+        );
         self.poll_terminate_message(cx).expect("message is set")
     }
 
@@ -916,7 +941,7 @@ impl<N: NetworkPrimitives> Future for ActiveSession<N> {
                                             message_type=?std::any::type_name::<EthMessage<N>>(),
                                             inflight_requests_count=?this.inflight_requests.len(),
                                             received_requests_count=?this.received_requests_from_remote.len(),
-                                            "BadMessage detected - closing session due to protocol violation"
+                                            "BadMessage detected in poll - calling close_on_error"
                                         );
                                         debug!(target: "net::session", %error, msg=?message, remote_peer_id=?this.remote_peer_id, "received invalid protocol message");
                                         return this.close_on_error(error, cx)
